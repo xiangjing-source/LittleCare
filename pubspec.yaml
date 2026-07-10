@@ -1,0 +1,31 @@
+name: family_health_monitor
+description: A warm family health monitoring MVP built with Flutter and Firebase.
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.7.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  cloud_firestore: ^6.6.0
+  firebase_auth: ^6.5.4
+  firebase_core: ^4.11.0
+  flutter_riverpod: ^3.3.2
+  go_router: ^17.3.0
+  shared_preferences: ^2.5.5
+  web: ^1.1.1
+  firebase_messaging: ^16.4.1
+  flutter_local_notifications: ^22.0.1
+  # Demo-mode persistence only; Firebase remains the production data source.
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

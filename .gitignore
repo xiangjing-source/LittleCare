@@ -1,0 +1,25 @@
+.dart_tool/
+.tooling/
+.flutter-plugins
+.flutter-plugins-dependencies
+.idea/
+.metadata
+.packages
+.pub-cache/
+.pub/
+build/
+coverage/
+*.apk
+.agents/
+android/.gradle/
+android/local.properties
+ios/Flutter/ephemeral/
+*.iml
+
+# Firebase files belong to a specific project.
+android/app/google-services.json
+android/key.properties
+android/*.jks
+android/*.keystore
+ios/Runner/GoogleService-Info.plist
+lib/firebase_options.dart

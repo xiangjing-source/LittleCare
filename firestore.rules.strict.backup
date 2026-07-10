@@ -1,0 +1,256 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function membershipPath(groupId, userId) {
+      return /databases/$(database)/documents/group_memberships/$(groupId + '_' + userId);
+    }
+
+    function activeMember(groupId) {
+      return signedIn()
+        && exists(membershipPath(groupId, request.auth.uid))
+        && get(membershipPath(groupId, request.auth.uid)).data.status == 'active';
+    }
+
+    function activeMemberAfter(groupId) {
+      return signedIn()
+        && existsAfter(membershipPath(groupId, request.auth.uid))
+        && getAfter(membershipPath(groupId, request.auth.uid)).data.status == 'active';
+    }
+
+    function manager(groupId) {
+      return activeMember(groupId)
+        && get(membershipPath(groupId, request.auth.uid)).data.role in ['owner', 'admin'];
+    }
+
+    function owner(groupId) {
+      return activeMember(groupId)
+        && get(membershipPath(groupId, request.auth.uid)).data.role == 'owner';
+    }
+
+    function userIsActiveMember(groupId, userId) {
+      return exists(membershipPath(groupId, userId))
+        && get(membershipPath(groupId, userId)).data.status == 'active';
+    }
+
+    // Firestore Rules cannot iterate a dynamic list. The MVP therefore caps a
+    // record at five shared groups and checks each possible slot explicitly.
+    function memberOfAnySharedGroup(groupIds) {
+      return groupIds is list
+        && groupIds.size() <= 5
+        && (
+          (groupIds.size() > 0 && activeMember(groupIds[0]))
+          || (groupIds.size() > 1 && activeMember(groupIds[1]))
+          || (groupIds.size() > 2 && activeMember(groupIds[2]))
+          || (groupIds.size() > 3 && activeMember(groupIds[3]))
+          || (groupIds.size() > 4 && activeMember(groupIds[4]))
+        );
+    }
+
+    match /users/{userId} {
+      allow create, read, update: if signedIn() && request.auth.uid == userId;
+      allow delete: if false;
+    }
+
+    match /groups/{groupId} {
+      allow create: if signedIn()
+        && request.resource.data.created_by == request.auth.uid
+        && request.resource.data.schema_version == 2;
+      allow read: if activeMember(groupId);
+      allow update: if manager(groupId)
+        && request.resource.data.created_by == resource.data.created_by
+        && request.resource.data.schema_version == 2;
+      allow delete: if owner(groupId);
+    }
+
+    match /group_memberships/{membershipId} {
+      allow read: if signedIn()
+        && (
+          resource.data.user_id == request.auth.uid
+          || activeMember(resource.data.group_id)
+        );
+
+      allow create: if signedIn()
+        && request.resource.data.user_id == request.auth.uid
+        && request.resource.data.status == 'active'
+        && membershipId == request.resource.data.group_id + '_' + request.auth.uid
+        && (
+          (
+            request.resource.data.role == 'owner'
+            && request.resource.data.created_by_owner == true
+            && getAfter(/databases/$(database)/documents/groups/$(request.resource.data.group_id)).data.created_by
+              == request.auth.uid
+          )
+          || (
+            request.resource.data.role == 'member'
+            && request.resource.data.joined_via_code is string
+            && get(/databases/$(database)/documents/invite_codes/$(request.resource.data.joined_via_code)).data.group_id
+              == request.resource.data.group_id
+            && get(/databases/$(database)/documents/invite_codes/$(request.resource.data.joined_via_code)).data.active
+              == true
+          )
+        );
+
+      allow update: if signedIn()
+        && request.resource.data.group_id == resource.data.group_id
+        && request.resource.data.user_id == resource.data.user_id
+        && (
+          (
+            resource.data.user_id == request.auth.uid
+            && resource.data.role != 'owner'
+            && request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['status', 'updated_at'])
+            && request.resource.data.status == 'removed'
+          )
+          || manager(resource.data.group_id)
+        );
+      allow delete: if false;
+    }
+
+    match /invite_codes/{inviteCode} {
+      allow get: if signedIn();
+      allow list: if false;
+      allow create: if signedIn()
+        && request.resource.data.group_id is string
+        && activeMemberAfter(request.resource.data.group_id)
+        && getAfter(membershipPath(request.resource.data.group_id, request.auth.uid)).data.role
+          in ['owner', 'admin'];
+      allow update: if manager(resource.data.group_id);
+      allow delete: if false;
+    }
+
+    match /relation_aliases/{aliasId} {
+      allow read: if signedIn()
+        && resource.data.from_user_id == request.auth.uid
+        && activeMember(resource.data.group_id);
+      allow create, update: if signedIn()
+        && request.resource.data.from_user_id == request.auth.uid
+        && activeMember(request.resource.data.group_id)
+        && userIsActiveMember(
+          request.resource.data.group_id,
+          request.resource.data.to_user_id
+        )
+        && request.resource.data.nickname is string
+        && request.resource.data.nickname.size() > 0
+        && request.resource.data.nickname.size() <= 12;
+      allow delete: if signedIn()
+        && resource.data.from_user_id == request.auth.uid;
+    }
+
+    match /health_records/{recordId} {
+      allow read: if signedIn()
+        && (
+          resource.data.owner_user_id == request.auth.uid
+          || memberOfAnySharedGroup(resource.data.shared_group_ids)
+        );
+      allow create: if signedIn()
+        && request.resource.data.owner_user_id == request.auth.uid
+        && request.resource.data.schema_version == 2
+        && request.resource.data.measured_at is timestamp
+        && request.resource.data.note is string
+        && request.resource.data.note.size() <= 120
+        && request.resource.data.shared_group_ids is list
+        && request.resource.data.shared_group_ids.size() <= 5;
+      allow update: if signedIn()
+        && resource.data.owner_user_id == request.auth.uid
+        && request.resource.data.owner_user_id == resource.data.owner_user_id
+        && request.resource.data.shared_group_ids is list
+        && request.resource.data.shared_group_ids.size() <= 5;
+      allow delete: if signedIn()
+        && resource.data.owner_user_id == request.auth.uid;
+    }
+
+    match /record_shares/{shareId} {
+      allow read: if signedIn()
+        && (
+          resource.data.owner_user_id == request.auth.uid
+          || activeMember(resource.data.group_id)
+        );
+      allow create: if signedIn()
+        && request.resource.data.owner_user_id == request.auth.uid
+        && activeMember(request.resource.data.group_id)
+        && getAfter(/databases/$(database)/documents/health_records/$(request.resource.data.record_id)).data.owner_user_id
+          == request.auth.uid;
+      allow update: if false;
+      allow delete: if signedIn()
+        && resource.data.owner_user_id == request.auth.uid;
+    }
+
+    match /care_events/{careId} {
+      allow read: if signedIn()
+        && activeMember(resource.data.group_id)
+        && request.auth.uid in [resource.data.from_user_id, resource.data.to_user_id];
+      allow create: if signedIn()
+        && request.resource.data.from_user_id == request.auth.uid
+        && activeMember(request.resource.data.group_id)
+        && userIsActiveMember(
+          request.resource.data.group_id,
+          request.resource.data.to_user_id
+        )
+        && request.resource.data.message is string
+        && request.resource.data.message.size() > 0
+        && request.resource.data.message.size() <= 80
+        && request.resource.data.care_type in ['preset', 'custom', 'response'];
+      allow update: if signedIn()
+        && resource.data.to_user_id == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['read_at']);
+      allow delete: if false;
+    }
+
+    match /notification_preferences/{userId} {
+      allow create, read, update: if signedIn() && request.auth.uid == userId;
+      allow delete: if false;
+    }
+
+    // v1 Family compatibility remains readable during migration. New writes
+    // should use the v2 collections above.
+    function legacyMember(familyId) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid));
+    }
+
+    match /families/{familyId} {
+      allow read: if legacyMember(familyId);
+      allow create: if signedIn()
+        && request.resource.data.owner_id == request.auth.uid;
+      allow update, delete: if false;
+
+      match /members/{memberId} {
+        allow read: if legacyMember(familyId);
+        allow create: if signedIn() && memberId == request.auth.uid;
+        allow update, delete: if false;
+      }
+
+      match /relations/{relationId} {
+        allow read: if legacyMember(familyId)
+          && resource.data.from_user_id == request.auth.uid;
+        allow create, update: if legacyMember(familyId)
+          && request.resource.data.from_user_id == request.auth.uid;
+        allow delete: if false;
+      }
+
+      match /healthRecords/{recordId} {
+        allow read: if legacyMember(familyId);
+        allow create: if legacyMember(familyId)
+          && request.resource.data.user_id == request.auth.uid;
+        allow update, delete: if false;
+      }
+    }
+
+    match /inviteCodes/{inviteCode} {
+      allow get: if signedIn();
+      allow list: if false;
+      allow create: if signedIn();
+      allow update, delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
