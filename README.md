@@ -21,7 +21,8 @@ LittleCare 是一款面向亲近关系的健康记录与关心应用。
 
 请在 GitHub Release 中下载：
 
-- `LittleCare.apk`
+- Release 页面：[LittleCare v1.0.0](https://github.com/xiangjing-source/LittleCare/releases/tag/v1.0.0)
+- Android 安装包：[LittleCare.apk](https://github.com/xiangjing-source/LittleCare/releases/download/v1.0.0/LittleCare.apk)
 
 安装前，Android 设备可能会提示“允许安装未知来源应用”。这是因为当前版本暂未上架应用商店。
 
