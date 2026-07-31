@@ -2,8 +2,234 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function bindingPath() {
+      return /databases/$(database)/documents/auth_bindings/$(request.auth.uid);
+    }
+
+    function hasBinding() {
+      return signedIn() && exists(bindingPath());
+    }
+
+    function accountId() {
+      return hasBinding() ? get(bindingPath()).data.account_id : request.auth.uid;
+    }
+
+    function isSelf(userId) {
+      return signedIn() && (userId == request.auth.uid || userId == accountId());
+    }
+
+    function membershipPath(groupId, userId) {
+      return /databases/$(database)/documents/group_memberships/$(groupId + "_" + userId);
+    }
+
+    function activeMember(groupId, userId) {
+      return signedIn() &&
+        exists(membershipPath(groupId, userId)) &&
+        get(membershipPath(groupId, userId)).data.status == "active";
+    }
+
+    function activeCurrentMember(groupId) {
+      return activeMember(groupId, accountId());
+    }
+
+    function groupManager(groupId, userId) {
+      return activeMember(groupId, userId) &&
+        (
+          get(membershipPath(groupId, userId)).data.role == "owner" ||
+          get(membershipPath(groupId, userId)).data.role == "admin"
+        );
+    }
+
+    function currentGroupManager(groupId) {
+      return groupManager(groupId, accountId());
+    }
+
+    function validMembershipId(membershipId, groupId, userId) {
+      return membershipId == groupId + "_" + userId;
+    }
+
+    function validRecordShareId(shareId, recordId, groupId) {
+      return shareId == recordId + "_" + groupId;
+    }
+
+    match /auth_bindings/{firebaseUid} {
+      allow get: if signedIn() && firebaseUid == request.auth.uid;
+      allow create, update: if signedIn() &&
+        firebaseUid == request.auth.uid &&
+        request.resource.data.firebase_uid == request.auth.uid &&
+        request.resource.data.status == "active";
+      allow list, delete: if false;
+    }
+
+    match /users/{userId} {
+      // Existing client-side recovery and group display-name lookup require
+      // signed-in reads. Move recovery to a trusted backend before tightening.
+      allow get, list: if signedIn();
+      allow create: if signedIn() &&
+        (
+          userId == request.auth.uid ||
+          request.resource.data.auth_uid == request.auth.uid ||
+          request.resource.data.account_id == userId ||
+          request.resource.data.public_user_id == userId
+        );
+      allow update: if isSelf(userId) ||
+        (
+          signedIn() &&
+          request.resource.data.diff(resource.data).changedKeys().hasOnly([
+            "selected_group_id",
+            "updated_at",
+            "last_signed_in_at",
+            "auth_uid",
+            "recovery_phone_normalized",
+            "recovery_phone_hash",
+            "recovery_code",
+            "recovery_code_hash",
+            "schema_version"
+          ])
+        );
+      allow delete: if false;
+    }
+
+    match /groups/{groupId} {
+      allow get: if signedIn();
+      allow list: if false;
+      allow create: if signedIn() &&
+        request.resource.data.created_by == accountId();
+      allow update: if currentGroupManager(groupId);
+      allow delete: if false;
+    }
+
+    match /group_memberships/{membershipId} {
+      allow get: if signedIn() &&
+        (
+          isSelf(resource.data.user_id) ||
+          activeCurrentMember(resource.data.group_id)
+        );
+      allow list: if signedIn();
+      allow create: if signedIn() &&
+        validMembershipId(
+          membershipId,
+          request.resource.data.group_id,
+          request.resource.data.user_id
+        ) &&
+        (
+          isSelf(request.resource.data.user_id) ||
+          currentGroupManager(request.resource.data.group_id)
+        );
+      allow update: if signedIn() &&
+        validMembershipId(
+          membershipId,
+          resource.data.group_id,
+          resource.data.user_id
+        ) &&
+        (
+          isSelf(resource.data.user_id) ||
+          currentGroupManager(resource.data.group_id)
+        );
+      allow delete: if false;
+    }
+
+    match /invite_codes/{inviteCode} {
+      allow get: if signedIn();
+      allow list: if false;
+      allow create, update: if signedIn() &&
+        currentGroupManager(request.resource.data.group_id);
+      allow delete: if false;
+    }
+
+    match /relation_aliases/{aliasId} {
+      allow get, list: if signedIn();
+      allow create, update: if signedIn() &&
+        request.resource.data.from_user_id == accountId() &&
+        activeCurrentMember(request.resource.data.group_id);
+      allow delete: if false;
+    }
+
+    match /health_records/{recordId} {
+      allow get: if signedIn() &&
+        (
+          isSelf(resource.data.owner_user_id) ||
+          resource.data.shared_group_ids.hasAny([accountId()]) ||
+          resource.data.shared_group_ids.size() > 0
+        );
+      // Group trend queries are currently based on shared_group_ids arrayContains.
+      // The app still filters by group membership; migrate to record_shares for
+      // stricter query-time authorization.
+      allow list: if signedIn();
+      allow create: if signedIn() &&
+        request.resource.data.owner_user_id == accountId();
+      allow update, delete: if signedIn() &&
+        resource.data.owner_user_id == accountId();
+    }
+
+    match /record_shares/{shareId} {
+      allow get, list: if signedIn();
+      allow create, update: if signedIn() &&
+        request.resource.data.owner_user_id == accountId() &&
+        validRecordShareId(
+          shareId,
+          request.resource.data.record_id,
+          request.resource.data.group_id
+        );
+      allow delete: if signedIn() &&
+        resource.data.owner_user_id == accountId();
+    }
+
+    match /care_events/{careId} {
+      allow get: if signedIn() &&
+        (
+          resource.data.from_user_id == accountId() ||
+          resource.data.to_user_id == accountId()
+        );
+      allow list: if signedIn();
+      allow create: if signedIn() &&
+        request.resource.data.from_user_id == accountId() &&
+        activeCurrentMember(request.resource.data.group_id);
+      allow update: if signedIn() &&
+        resource.data.to_user_id == accountId() &&
+        request.resource.data.diff(resource.data).changedKeys().hasOnly(["read_at"]);
+      allow delete: if false;
+    }
+
+    match /notification_preferences/{userId} {
+      allow get: if isSelf(userId);
+      allow create, update: if isSelf(userId) &&
+        request.resource.data.user_id == userId;
+      allow list, delete: if false;
+    }
+
+    match /device_tokens/{tokenId} {
+      allow get, delete: if signedIn() &&
+        resource.data.user_id == accountId();
+      allow create, update: if signedIn() &&
+        request.resource.data.user_id == accountId();
+      allow list: if false;
+    }
+
+    // Legacy family MVP collections kept authenticated but scoped away from
+    // anonymous public access.
+    match /families/{familyId} {
+      allow read, write: if signedIn();
+
+      match /members/{memberId} {
+        allow read, write: if signedIn();
+      }
+
+      match /relations/{relationId} {
+        allow read, write: if signedIn();
+      }
+    }
+
+    match /inviteCodes/{inviteCode} {
+      allow read, write: if signedIn();
+    }
+
     match /{document=**} {
-      allow read, write: if request.auth != null;
+      allow read, write: if false;
     }
   }
 }
